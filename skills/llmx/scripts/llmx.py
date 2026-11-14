@@ -82,9 +82,56 @@ def ep_usable(name, ep, cfg, task_cloud_ok=True):
 
 def state_file(name): STATE.mkdir(parents=True, exist_ok=True); return STATE / f"{name}.pid"
 
-def start(name, ep):
+def free_gb():
+    """Memory a new model can take without swapping: free + inactive + speculative + purgeable (macOS) / MemAvailable (Linux). None if unknown."""
+    if os.environ.get("LLMX_FREE_GB"): return float(os.environ["LLMX_FREE_GB"])      # tests
+    try:
+        if sys.platform == "darwin":
+            # macOS's own estimate of what is available (free + purgeable + reclaimable file cache); vm_stat alone undercounts the cache
+            mp = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10).stdout
+            m = re.search(r"free percentage:\s*(\d+)%", mp)
+            if m: return int(m.group(1)) / 100 * int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout) / 2**30
+            o = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+            ps = int(re.search(r"page size of (\d+)", o).group(1))
+            n = sum(int(m.group(1)) for k in ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable") for m in [re.search(k + r":\s+(\d+)", o)] if m)
+            return n * ps / 2**30
+        for l in open("/proc/meminfo"):
+            if l.startswith("MemAvailable:"): return int(l.split()[1]) / 2**20
+    except Exception: return None
+
+def make_room(name, ep, cfg):
+    """One big local model in RAM at a time. If `mem_gb` is set and free memory is short, stop the other local servers llmx started
+    (never ones started by hand) and wait for the memory to come back. -> (ok, reason)."""
+    need = ep.get("mem_gb")
+    if not need: return True, ""
+    need += cfg["policy"].get("mem_margin_gb", 3)
+    f = free_gb()
+    if f is None or f >= need: return True, ""
+    others = [(n, e) for n, e in cfg["endpoints"].items() if n != name and not is_cloud(e) and e.get("mem_gb") and ep_up(e)]
+    mine = [n for n, e in others if state_file(n).exists()]
+    for n in mine: stop(n)
+    if cfg["policy"].get("stop_foreign", False):          # opt-in: also stop a server of ours that was started by hand (found by its port)
+        for n, e in others:
+            if n in mine: continue
+            port = re.search(r":(\d+)", e["base_url"].split("//", 1)[-1])
+            pids = subprocess.run(["lsof", "-ti", f"tcp:{port.group(1)}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split() if port else []
+            for pid in pids:
+                try: os.kill(int(pid), 15); mine.append(n)
+                except Exception: pass
+    t0 = time.time()
+    while mine and time.time() - t0 < cfg["policy"].get("mem_wait_s", 30):
+        f = free_gb()
+        if f is None or f >= need: return True, ""
+        time.sleep(1.5)
+    byhand = [n for n, e in others if n not in mine]
+    return False, f"not enough free memory ({f:.0f} GB free, {need:.0f} needed)" + (f"; {', '.join(byhand)} runs outside llmx: stop it yourself" if byhand else "; close other apps")
+
+def start(name, ep, cfg=None):
     cmd = ep.get("start")
     if not cmd: return False
+    if cfg is not None:
+        ok, why = make_room(name, ep, cfg)
+        if not ok: print(f"llmx: {name}: {why}", file=sys.stderr); return False
     STATE.mkdir(parents=True, exist_ok=True)
     log = open(STATE / f"{name}.log", "ab")
     p = subprocess.Popen(cmd, shell=True, stdout=log, stderr=log, start_new_session=True)
@@ -344,7 +391,7 @@ def pick_endpoint(cfg, name, a, why, local_only):
     if local_only and is_cloud(ep): why.append(f"{name}: --local-only"); return None
     if not ep_up(ep):
         if loading(name, ep): why.append(f"{name}: still loading/downloading (llmx status)"); return None
-        if not (ep.get("autostart") and start(name, ep)):
+        if not (ep.get("autostart") and start(name, ep, cfg)):
             if loading(name, ep): touch_and_watch(name, ep)
             why.append(f"{name}: not reachable" + (" (started, still loading)" if loading(name, ep) else "")); return None
     return ep
@@ -437,6 +484,8 @@ def cmd_eval(a):
 def cmd_status(a):
     cfg = load_cfg(); res = {}
     print(f"config: {USER_CFG} ({'found' if USER_CFG.exists() else 'MISSING: llmx init'}); enabled={enabled(cfg)}; allow_cloud={cfg['policy'].get('allow_cloud', False)}")
+    fg = free_gb()
+    if fg is not None: print(f"free memory: {fg:.0f} GB (a local endpoint with mem_gb starts only if it fits; llmx stops the other local server it started)")
     for n, ep in cfg["endpoints"].items():
         ok, r = ep_usable(n, ep, cfg)
         up = ep_up(ep) if ok else False
@@ -477,7 +526,7 @@ def cmd_up(a):
     ep = load_cfg()["endpoints"].get(a.name)
     if not ep: print("unknown endpoint"); return 2
     if ep_up(ep): print("up"); return 0
-    if not loading(a.name, ep) and not start(a.name, ep) and not loading(a.name, ep):
+    if not loading(a.name, ep) and not start(a.name, ep, load_cfg()) and not loading(a.name, ep):
         print(f"failed (see {STATE}/{a.name}.log)"); return 1
     touch_and_watch(a.name, ep)
     if ep_up(ep): print("up"); return 0

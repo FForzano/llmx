@@ -66,4 +66,33 @@ C
 LLMX_CONFIG="$T/c2.toml" $L run summarize --in "$T/a.py" >/dev/null 2>&1; ok "autostart works" $? 0
 sleep 1; LLMX_CONFIG="$T/c2.toml" $L status | grep -q "  i .*UP"; ok "server up after use" $? 0
 sleep 75; LLMX_CONFIG="$T/c2.toml" $L status | grep -q "  i .*UP"; ok "server stopped when idle" $? 1
+# one big model at a time: starting B stops A (started by llmx) when free memory is short, and refuses if it still does not fit
+cat > "$T/c3.toml" <<C
+[policy]
+mem_wait_s = 2
+[endpoints.a]
+base_url = "http://127.0.0.1:18996/v1"
+autostart = true
+mem_gb = 20
+idle_minutes = 0
+start_timeout = 10
+start = "python3 $D/mock_server.py 18996"
+[endpoints.b]
+base_url = "http://127.0.0.1:18995/v1"
+autostart = true
+mem_gb = 20
+idle_minutes = 0
+start_timeout = 10
+start = "python3 $D/mock_server.py 18995"
+[tasks]
+default = ["a"]
+x = ["b"]
+C
+export LLMX_CONFIG="$T/c3.toml"
+LLMX_FREE_GB=100 $L up a >/dev/null 2>&1
+LLMX_FREE_GB=100 $L up b >/dev/null 2>&1; $L status | grep -c " UP" | grep -q 2; ok "plenty of free memory: both may run" $? 0
+$L down b >/dev/null
+LLMX_FREE_GB=5 $L up b >/dev/null 2>&1; $L status | grep -E "^  a " | grep -q UP; ok "short on memory: a (started by llmx) is stopped before b" $? 1
+$L status | grep -E "^  b " | grep -q UP; ok "b refuses to start if memory stays short" $? 1
+$L down a >/dev/null; $L down b >/dev/null
 exit $fail

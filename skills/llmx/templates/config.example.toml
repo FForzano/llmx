@@ -3,6 +3,8 @@
 
 [policy]
 enabled = true
+stop_foreign = false    # true: to make room for a bigger local model, llmx also stops a configured local server you started by hand (found by its port)
+mem_margin_gb = 3       # memory left free for macOS and apps when checking `mem_gb`
 allow_cloud = false     # PRIVACY: false = code and unpublished manuscripts never leave the machine. Set true only if you accept it
                         # (or set it per project in .llmx.toml). `llmx run --local-only` forces local whatever this says.
 
@@ -15,6 +17,7 @@ context = 32768
 no_think = true                   # sends enable_thinking=false (Qwen3-style models)
 autostart = true                  # llmx starts it on first use (`llmx down local-fast` stops it by hand)
 idle_minutes = 10                 # llmx stops a server IT started after 10 idle minutes, freeing the RAM (0 = never)
+mem_gb = 19                       # file size of the model: before starting, llmx checks free memory and stops the OTHER local server (one big model in RAM at a time)
 # passes = 2                      # findings tasks: independent passes (default 2 on local endpoints, 1 on cloud); max_chunks = 8: longer inputs are refused
 start = "llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M --port 8081 --ctx-size 32768 -ngl 99 --jinja --alias qwen-fast"
 
@@ -23,9 +26,11 @@ kind = "local"
 base_url = "http://127.0.0.1:8082/v1"
 model = "qwen-big"
 context = 24576
-no_think = false
+no_think = false                  # thinking on: better recall on second-opinion tasks (slower)
+max_tokens = 6000                 # room for the thinking plus the answer
 idle_minutes = 10
-autostart = false                 # start by hand (`llmx up local-big`): it takes most of the RAM
+mem_gb = 20
+autostart = true                  # starting it makes room first (stops local-fast); switching models costs a load from disk (~10-30 s)
 start = "llama-server -hf unsloth/Qwen3-32B-GGUF:Q4_K_M --port 8082 --ctx-size 24576 -ngl 99 --jinja --alias qwen-big"
 
 # Ollama alternative:  base_url = "http://127.0.0.1:11434/v1"  model = "qwen3-coder:30b"  (no start: the Ollama app runs it)
@@ -47,9 +52,9 @@ summarize      = ["local-fast", "cloud-cheap"]
 log-triage     = ["local-fast", "cloud-cheap"]
 module-summary = ["local-fast", "cloud-cheap"]
 commit-draft   = ["local-fast", "cloud-cheap"]
-test-draft     = ["local-big", "local-fast", "cloud-cheap"]
-review-scan    = ["local-big", "local-fast", "cloud-cheap"]   # candidates only: Claude verifies each
-lang-scan      = ["local-big", "local-fast", "cloud-cheap"]
+test-draft     = ["local-fast", "local-big", "cloud-cheap"]
+review-scan    = ["local-fast", "local-big", "cloud-cheap"]   # candidates only: Claude verifies each
+lang-scan      = ["local-fast", "local-big", "cloud-cheap"]
 claims-scan    = ["local-big", "cloud-cheap"]
 referee        = ["local-big", "cloud-cheap"]                 # independent second opinion, never the final report
 split-comments = ["local-fast", "cloud-cheap"]

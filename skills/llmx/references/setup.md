@@ -21,6 +21,9 @@ The GPU can use about 24-27 GB: **one** ~18-20 GB model resident at a time, not 
 ## Cloud, cheap and open (optional)
 Providers with OpenAI-compatible APIs (DeepSeek, Alibaba Qwen, DeepInfra, Together, Groq, OpenRouter, Z.ai): a few cents per million tokens for the flash/small tiers. Export the key in your shell profile, set `policy.allow_cloud = true`. Per project: `.llmx.toml` in the root with `[policy]\nallow_cloud = false`: **use this in every paper/thesis folder (unpublished work, blind review) and in client code.**
 
+## Measured here (M4 Max 36 GB, `llmx eval`, 5 small cases)
+Qwen3-Coder-30B-A3B (local-fast) and Qwen3-32B with thinking (local-big) found the same seeded defects (2/2 on review, language, log, module summaries) and both gave one false positive on clean code; local-big took 40-180 s per case against 1-8 s, and without thinking it lost recall (1/2). So local-fast is first for everything; local-big is kept for `claims-scan` and `referee` (independent second opinion) and as fallback. Re-run `llmx eval` with your own cases before changing the order.
+
 ## Check that it helps
 `llmx eval` first: it runs known cases on each endpoint (recall on seeded defects, false positives on clean code, invented findings caught by the gate). Add your own real cases (a log, a diff with a known bug, a clean file) to `~/.config/llmx/evals/cases.json` (`{"task","name","file","expect":[strings or [alternatives]]}`, `file` relative to that folder).
 Then `llmx stats` shows tokens moved. Keep a task on a model only if its candidates mostly survive Claude's verification: if >~30% of review-scan findings are dropped or wrong, move that task to a stronger tier or remove it from `[tasks]` (the skills then do it in Claude, as before).
