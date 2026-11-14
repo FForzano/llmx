@@ -16,13 +16,16 @@ Only tasks that are bulk-in, small-out, or that benefit from a second independen
 2. **Second opinion, not replacement.** For judgment tasks (review, referee, claims) do your own pass too, then merge: findings found by both are the strongest; found only by the model → verify; found only by you → keep. Never lower your own bar because the model found nothing.
 3. **Never offload**: edits, security decisions, final reports, anything needing the whole repo or paper in context, proofs/derivations.
 4. **Privacy**: cloud endpoints run only if `policy.allow_cloud = true`. For unpublished manuscripts, blind reviews, secrets, `.env`: add `--local-only`.
-5. **Send less, not more**: pass the diff hunks / error lines / one section (`--file` numbers lines), not the repo. Input too large for the endpoint context → exit 3; do not split to force it.
-6. Quality check of a model on this user's material: run the same small task on llmx and yourself a few times (`llmx run TASK ... ` vs your answer); if the model misses or invents often, remove it from that task in `[tasks]`.
+5. **Send less, not more**: pass the diff hunks / error lines / one section (`--file` numbers lines), not the repo. `log-triage`, `summarize`, `review-scan`, `lang-scan` split an input larger than the context into chunks by themselves (slow on very long inputs: run `ff debug log` first); the other tasks need the whole input and exit 3 if it does not fit.
+6. **What llmx already checks for you** (mechanical, so you do not spend tokens on it): findings with a quote not in the input are dropped; text tasks (`log-triage`, `summarize`, `module-summary`) drop lines whose `backticked` name/line is not in the input; `commit-draft` is validated (subject ≤ 72, no period, blank line) with one repair round; `test-draft --out F --check CMD` runs the draft and repairs once with the real error (exit 4 = still failing, draft left in F). Findings come from 2 passes on local models: `[2/2]` = both passes agree (strongest), `[1/2]` = one pass only (verify with extra care). This lowers noise; it does not make a candidate true.
+7. **Measure, don't guess**: `llmx eval [TASK]` runs known cases (shipped in `evals/cases.json`, plus yours in `~/.config/llmx/evals/cases.json`) and prints recall, false positives on clean inputs and invented findings caught. Run it after changing a model or a prompt; remove a task from a model in `[tasks]` when it misses real defects or floods clean code. `llmx stats` shows the gate-dropped share per task: a high one means that model invents.
 
 ## Commands
 ```bash
 llmx status                       # endpoints up/down, resolved endpoint per task
-llmx run TASK -f FILE [-f ...] [--in FILE|-] [-p "extra instruction"] [--local-only] [--endpoint NAME]
+llmx run TASK -f FILE [-f ...] [--in FILE|-] [-p "extra instruction"] [--local-only] [--endpoint NAME] [--passes N]
+llmx run test-draft -f SRC -p "..." --out tests/test_x.py --check "<narrow test cmd on {out}>"
+llmx eval [TASK] [--endpoint NAME]   # recall / false positives / invented findings on known cases
 llmx up|down NAME                 # start/stop a local server (needs `start` in config)
 llmx stats                        # tokens and cost offloaded;  llmx init: write the example config
 ```

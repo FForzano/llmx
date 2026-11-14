@@ -1,0 +1,9 @@
+[12:00:01] INFO  starting build
+[12:00:02] INFO  compiling module core
+[12:00:03] WARN  deprecated call in utils/io.py:41
+[12:00:04] INFO  compiling module api
+[12:00:05] ERROR api/handlers.py:88 KeyError: 'user_id'
+[12:00:05] ERROR Traceback (most recent call last):
+[12:00:05] ERROR   File "api/handlers.py", line 88, in get_user
+[12:00:05] ERROR     uid = payload['user_id']
+[12:00:06] INFO  build failed with 1 error

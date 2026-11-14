@@ -1,0 +1,48 @@
+[
+ {
+  "task": "review-scan",
+  "name": "py-bugs",
+  "file": "data/divzero.py",
+  "expect": [
+   "total / len(values)",
+   [
+    "f = open(path)",
+    "json.load(f)"
+   ]
+  ]
+ },
+ {
+  "task": "review-scan",
+  "name": "py-clean",
+  "file": "data/clean.py",
+  "expect": []
+ },
+ {
+  "task": "lang-scan",
+  "name": "tex-style",
+  "file": "data/prose.tex",
+  "expect": [
+   "very novel",
+   "The scheme were"
+  ]
+ },
+ {
+  "task": "log-triage",
+  "name": "log-keyerror",
+  "file": "data/build.log",
+  "expect": [
+   "KeyError: 'user_id'",
+   "api/handlers.py"
+  ]
+ },
+ {
+  "task": "module-summary",
+  "name": "mod-names",
+  "file": "data/mod.py",
+  "expect": [
+   "Cache",
+   "make_cache"
+  ],
+  "numbered": true
+ }
+]

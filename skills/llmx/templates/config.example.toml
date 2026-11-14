@@ -15,6 +15,7 @@ context = 32768
 no_think = true                   # sends enable_thinking=false (Qwen3-style models)
 autostart = true                  # llmx starts it on first use (`llmx down local-fast` stops it by hand)
 idle_minutes = 10                 # llmx stops a server IT started after 10 idle minutes, freeing the RAM (0 = never)
+# passes = 2                      # findings tasks: independent passes (default 2 on local endpoints, 1 on cloud); max_chunks = 8: longer inputs are refused
 start = "llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M --port 8081 --ctx-size 32768 -ngl 99 --jinja --alias qwen-fast"
 
 [endpoints.local-big]             # dense ~27-32B: second-opinion reviews, language scans (slower, better)
