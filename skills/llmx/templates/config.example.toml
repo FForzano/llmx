@@ -1,0 +1,54 @@
+# llmx config: ~/.config/llmx/config.toml  (a project can override with .llmx.toml in its root)
+# Every endpoint is any OpenAI-compatible server. Nothing here is required: with no endpoint up, the skills do everything in Claude.
+
+[policy]
+enabled = true
+allow_cloud = false     # PRIVACY: false = code and unpublished manuscripts never leave the machine. Set true only if you accept it
+                        # (or set it per project in .llmx.toml). `llmx run --local-only` forces local whatever this says.
+
+# ---- local (llama.cpp, Ollama, LM Studio, mlx_lm.server ...) --------------------------------------
+[endpoints.local-fast]            # small/MoE model: log triage, summaries, commit drafts, first-pass scans
+kind = "local"
+base_url = "http://127.0.0.1:8081/v1"
+model = "qwen-fast"
+context = 32768
+no_think = true                   # sends enable_thinking=false (Qwen3-style models)
+autostart = true                  # llmx starts it on first use (`llmx down local-fast` stops it by hand)
+idle_minutes = 10                 # llmx stops a server IT started after 10 idle minutes, freeing the RAM (0 = never)
+start = "llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M --port 8081 --ctx-size 32768 -ngl 99 --jinja --alias qwen-fast"
+
+[endpoints.local-big]             # dense ~27-32B: second-opinion reviews, language scans (slower, better)
+kind = "local"
+base_url = "http://127.0.0.1:8082/v1"
+model = "qwen-big"
+context = 24576
+no_think = false
+idle_minutes = 10
+autostart = false                 # start by hand (`llmx up local-big`): it takes most of the RAM
+start = "llama-server -hf unsloth/Qwen3-32B-GGUF:Q4_K_M --port 8082 --ctx-size 24576 -ngl 99 --jinja --alias qwen-big"
+
+# Ollama alternative:  base_url = "http://127.0.0.1:11434/v1"  model = "qwen3-coder:30b"  (no start: the Ollama app runs it)
+
+# ---- cloud, cheap/open (used only if policy.allow_cloud = true and the key is in the environment) ---
+[endpoints.cloud-cheap]
+kind = "cloud"
+base_url = "https://api.deepseek.com/v1"     # or OpenRouter https://openrouter.ai/api/v1, Together, Groq, DeepInfra, Z.ai ...
+model = "deepseek-chat"                      # check the provider's current model name and prices
+api_key_env = "DEEPSEEK_API_KEY"
+context = 65536
+cost_in = 0.14                               # $/Mtok, only for `llmx stats`
+cost_out = 0.28
+
+# ---- which endpoints, in order, per task ("claude" = nothing listed is usable: Claude does it) -----
+[tasks]
+default        = ["local-fast", "cloud-cheap"]
+summarize      = ["local-fast", "cloud-cheap"]
+log-triage     = ["local-fast", "cloud-cheap"]
+module-summary = ["local-fast", "cloud-cheap"]
+commit-draft   = ["local-fast", "cloud-cheap"]
+test-draft     = ["local-big", "local-fast", "cloud-cheap"]
+review-scan    = ["local-big", "local-fast", "cloud-cheap"]   # candidates only: Claude verifies each
+lang-scan      = ["local-big", "local-fast", "cloud-cheap"]
+claims-scan    = ["local-big", "cloud-cheap"]
+referee        = ["local-big", "cloud-cheap"]                 # independent second opinion, never the final report
+split-comments = ["local-fast", "cloud-cheap"]
