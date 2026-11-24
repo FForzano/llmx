@@ -21,6 +21,7 @@ BT = " Write every file path, identifier, number, error message and copied line 
 FIND = ('Return ONLY a JSON array. Each item: {"file": str, "line": int, "severity": "blocker|major|minor", '
         '"quote": "<exact text copied from the input, <=120 chars>", "issue": "<one sentence>"}. '
         'Every item MUST quote the input verbatim; no quote, no item. Empty array if nothing is wrong. No prose.')
+SMALL_SKIP = {"log-triage", "summarize", "module-summary", "commit-draft", "review-scan", "lang-scan"}   # below policy.min_chars the offload costs more than it saves
 TASKS = {
     "ask":          dict(kind="text", system="Answer precisely and briefly."),
     "summarize":    dict(kind="text", ground=True, chunk=True, system="Summarize the input faithfully in at most 10 short lines. Keep names, numbers, file paths and error messages exactly. Add nothing." + BT),
@@ -229,14 +230,46 @@ def verify_findings(items, files, raw_input):
         keep.append(it)
     return keep, dropped
 
-def ground_text(out, raw_input):
+def span_ok(sp, hay):
+    """A backticked span is grounded if it occurs in the input, ignoring line-number prefixes and with "..." / "…" standing for any text."""
+    sp = norm(re.sub(r"(?m)^\d+\| ", "", sp))
+    pieces = [x.strip() for x in re.split(r"\.{3}|…", sp)]
+    return all(len(x) < 4 or x in hay for x in pieces)
+
+def ground_text(out, raw_input, samples=None):
     """Text tasks: a line whose `backticked` span is not in the input is invented: drop it. Returns (text, dropped)."""
     hay = norm(raw_of(raw_input)); keep, dropped = [], 0
     for l in out.splitlines():
-        spans = re.findall(r"`([^`\n]+)`", l)
-        if any(len(norm(sp)) >= 4 and norm(sp) not in hay for sp in spans): dropped += 1; continue
+        bad = [sp for sp in re.findall(r"`([^`\n]+)`", l) if not span_ok(sp, hay)]
+        if bad:
+            dropped += 1
+            if samples is not None and len(samples) < 3: samples.append(bad[0][:80])
+            continue
         keep.append(l)
     return "\n".join(keep).strip(), dropped
+
+# ---- mechanical log reduction: no model, no tokens. Collapses repeats, then keeps errors with context, head and tail ----------
+ERRX = re.compile(r"(error|exception|traceback|fatal|failed|fail\b|assert|panic|undefined|cannot|denied|timeout|warn)", re.I)
+def reduce_log(text, limit=20000):
+    lines = text.splitlines(); out = []; prev = None; run = 0
+    def key(l): return re.sub(r"\d+", "#", re.sub(r"^\d+\| ", "", l)).strip()
+    for l in lines:
+        k = key(l)
+        if k and k == prev: run += 1; continue
+        if run: out.append(f"[... {run} more similar lines]")
+        out.append(l); prev = k; run = 0
+    if run: out.append(f"[... {run} more similar lines]")
+    if sum(len(l) + 1 for l in out) <= limit: return "\n".join(out)
+    n = len(out); keep = set(range(min(15, n))) | set(range(max(0, n - 30), n))
+    for i, l in enumerate(out):
+        if ERRX.search(l): keep |= set(range(max(0, i - 2), min(n, i + 3)))
+    res = []; last = -1
+    for i in sorted(keep):
+        if i != last + 1: res.append(f"[... {i - last - 1} lines omitted]")
+        res.append(out[i][:400]); last = i
+    if last < n - 1: res.append(f"[... {n - 1 - last} lines omitted]")
+    txt = "\n".join(res)
+    return txt if len(txt) <= limit else txt[:limit // 2] + "\n[... middle cut ...]\n" + txt[-limit // 2:]
 
 def check_commit(out):
     lines = out.strip().splitlines()
@@ -307,7 +340,7 @@ def run_on1(ep, t, task, prefix, parts, files, a, scale):
     if len(units) > 1 and not chunkable: raise Fail(f"input ~{int(total/3.2)} tok too large for context")
     if len(units) > ep.get("max_chunks", 8): raise Fail(f"input needs {len(units)} chunks (max {ep.get('max_chunks', 8)})")
     npass = (a.passes or ep.get("passes") or t.get("passes", 1)) if t["kind"] == "findings" and not is_cloud(ep) else 1
-    pin = pout = kept_n = dropped_n = 0; outs = []
+    pin = pout = kept_n = dropped_n = 0; outs = []; samples = []
     for k, unit in enumerate(units):
         more = f"(Part {k+1} of {len(units)} of a longer input. If this part holds nothing relevant to the task, answer exactly: NONE)\n\n" if len(units) > 1 and t["kind"] == "text" else ""
         prompt = prefix + more + unit; msgs = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
@@ -356,7 +389,7 @@ def run_on1(ep, t, task, prefix, parts, files, a, scale):
             problem = check_commit(out)
             if problem: raise Fail(f"commit message invalid after repair: {problem}")
         if t.get("ground"):
-            out, d = ground_text(out, unit); dropped_n += d
+            out, d = ground_text(out, unit, samples); dropped_n += d
         if len(units) > 1 and re.fullmatch(r"\W*NONE\W*", out or "NONE"): continue
         outs.append(out)
     # ---- merge units ----
@@ -374,7 +407,7 @@ def run_on1(ep, t, task, prefix, parts, files, a, scale):
         out = json.dumps([x for ch in outs for x in (ch if isinstance(ch, list) else [ch])], ensure_ascii=False, indent=1)
     else:
         out = "(nothing relevant found)" if not outs else outs[0] if len(outs) == 1 else "\n".join(f"--- part {i+1}/{len(outs)} ---\n{o}" for i, o in enumerate(outs))
-    return dict(out=out, pin=pin, pout=pout, kept=kept_n, dropped=dropped_n, chunks=len(units), passes=npass)
+    return dict(out=out, pin=pin, pout=pout, kept=kept_n, dropped=dropped_n, samples=samples, chunks=len(units), passes=npass)
 
 def read_inputs(a):
     parts = []
@@ -411,6 +444,13 @@ def cmd_run(a):
     if a.check and not a.out: print("llmx: --check needs --out FILE", file=sys.stderr); return 2
     parts = read_inputs(a)
     if not "".join(parts).strip(): print("llmx: empty input", file=sys.stderr); return 2
+    orig_tok = len("".join(parts)) // 3
+    min_chars = int(os.environ.get("LLMX_MIN_CHARS", cfg.get("policy", {}).get("min_chars", 2500)))
+    if a.task in SMALL_SKIP and len("".join(parts)) < min_chars and not a.force:
+        print(f"llmx: input only ~{orig_tok} tokens: reading it yourself costs less than the offload plus the verification (--force to override)", file=sys.stderr); return 3
+    if a.task == "log-triage" and not a.raw:
+        parts = [reduce_log(p) for p in parts]
+        if len("".join(parts)) // 3 < orig_tok: print(f"llmx: log reduced mechanically ~{orig_tok}→~{len(''.join(parts)) // 3} tokens before the model", file=sys.stderr)
     prefix = (a.prompt + "\n\n" if a.prompt else "")
     order = [a.endpoint] if a.endpoint else (cfg["tasks"].get(a.task) or cfg["tasks"].get("default") or [])
     why = []
@@ -440,7 +480,7 @@ def cmd_run(a):
                 print(f"llmx: {a.task} draft kept in {a.out} but the check still fails:\n{log}\n(do the task yourself; the draft may help)", file=sys.stderr); return 4
             note += ", check passed"
         log_usage(dict(ts=int(time.time()), task=a.task, endpoint=name, cloud=is_cloud(ep), pin=r["pin"], pout=r["pout"], kept=r["kept"], dropped=r["dropped"],
-                       chunks=r["chunks"], passes=r["passes"], cost_in=ep.get("cost_in", 0), cost_out=ep.get("cost_out", 0), s=round(time.time() - t0, 1)))
+                       chunks=r["chunks"], passes=r["passes"], orig=orig_tok, samples=r.get("samples", []), cost_in=ep.get("cost_in", 0), cost_out=ep.get("cost_out", 0), s=round(time.time() - t0, 1)))
         touch_and_watch(name, ep)
         print(out)
         print(f"llmx: {a.task} via {name} ({r['pin']}→{r['pout']} tok, {time.time()-t0:.0f}s{note}); candidate output: verify before relying on it", file=sys.stderr)
@@ -506,15 +546,15 @@ def cmd_stats(a):
     for l in f.read_text().splitlines():
         try: r = json.loads(l)
         except Exception: continue
-        k = (r["task"], r["endpoint"]); g = agg.setdefault(k, [0, 0, 0, 0.0, 0, 0])
-        g[0] += 1; g[1] += r["pin"]; g[2] += r["pout"]; g[3] += (r["pin"] * r["cost_in"] + r["pout"] * r["cost_out"]) / 1e6
-        g[4] += r.get("kept", 0); g[5] += r.get("dropped", 0)
+        k = (r["task"], r["endpoint"]); g = agg.setdefault(k, [0, 0, 0, 0.0, 0, 0, 0, 0.0])
+        g[0] += 1; g[1] += r.get("orig", r["pin"]); g[2] += r["pout"]; g[3] += (r["pin"] * r["cost_in"] + r["pout"] * r["cost_out"]) / 1e6
+        g[4] += r.get("kept", 0); g[5] += r.get("dropped", 0); g[6] += r["pin"]; g[7] += r.get("s", 0)
     tin = tout = 0
-    for (t, e), (n, i, o, c, kp, dr) in sorted(agg.items()):
+    for (t, e), (n, i, o, c, kp, dr, pin, sec) in sorted(agg.items()):
         gate = f" gate-dropped={dr}/{kp + dr}" if kp + dr else ""
-        print(f"{t:15} {e:14} calls={n:4} in={i:8} out={o:7} cost=${c:.4f}{gate}"); tin += i; tout += o
-    print(f"offloaded: {tin} input tokens Claude did not read; Claude reads {tout} output tokens instead (net about {tin - tout} fewer, before its verification reads)")
-    print("a high gate-dropped share for a task/endpoint = that model invents: move the task to a stronger endpoint or `llmx eval`")
+        print(f"{t:15} {e:14} calls={n:4} orig_in={i:8} sent={pin:8} out={o:7} {sec:6.0f}s cost=${c:.4f}{gate}"); tin += i; tout += o
+    print(f"offloaded: ~{tin} input tokens Claude did not read; Claude reads {tout} output tokens instead (net about {tin - tout} fewer, before its verification reads)")
+    print("estimate only: it counts runs whose output the gate emptied as savings. A high gate-dropped share = that model invents: `llmx eval`, or use a stronger endpoint")
     return 0
 
 def cmd_init(a):
@@ -546,6 +586,7 @@ def main():
     r.add_argument("--local-only", action="store_true", help="never use a cloud endpoint, whatever the policy")
     r.add_argument("--passes", type=int, help="findings tasks: independent passes (default 2 on local endpoints); findings found by every pass are tagged [n/n]")
     r.add_argument("--check", help="test-draft: command run on the draft ({out} = the file); on failure the model gets one repair round with the real error")
+    r.add_argument("--force", action="store_true", help="run even if the input is small"); r.add_argument("--raw", action="store_true", help="log-triage: do not pre-reduce the log")
     r.add_argument("--out", help="file where --check finds the draft"); r.set_defaults(fn=cmd_run)
     e = s.add_parser("eval", help="measure endpoints on known cases (recall, false positives, invented findings)"); e.add_argument("task", nargs="?")
     e.add_argument("--endpoint"); e.add_argument("--passes", type=int); e.set_defaults(fn=cmd_eval)

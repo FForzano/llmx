@@ -2,7 +2,7 @@
 # Smoke tests with a mock OpenAI-compatible server. Run: tests/run.sh
 set -u
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; L="python3 $D/../skills/llmx/scripts/llmx.py"
-T=$(mktemp -d); export LLMX_CONFIG="$T/c.toml" LLMX_STATE="$T/state"; fail=0
+T=$(mktemp -d); export LLMX_CONFIG="$T/c.toml" LLMX_STATE="$T/state" LLMX_MIN_CHARS=0; fail=0
 ok() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1 (got $2, want $3)"; fail=1; fi; }
 python3 "$D/mock_server.py" 18999 & P=$!; trap 'kill $P 2>/dev/null; rm -rf "$T"' EXIT; sleep 1
 cat > "$T/c.toml" <<C
@@ -45,7 +45,7 @@ C
 python3 -c "
 for i in range(300): print('INFO step', i, 'ok')
 print('needle line')" > "$T/big.log"
-out=$($L run log-triage --endpoint small --in "$T/big.log" 2>"$T/err"); ok "chunked: runs" $? 0
+out=$($L run log-triage --raw --endpoint small --in "$T/big.log" 2>"$T/err"); ok "chunked: runs" $? 0
 ok "chunked: reports several chunks" "$(grep -c 'chunks' "$T/err")" 1
 ok "chunked: only the relevant part is returned" "$(echo "$out" | grep -c 'needle line')" 1
 $L run summarize --local-only --endpoint cl --in "$T/a.py" >/dev/null 2>&1; ok "--local-only refuses cloud (exit 3)" $? 3
@@ -95,4 +95,18 @@ $L down b >/dev/null
 LLMX_FREE_GB=5 $L up b >/dev/null 2>&1; $L status | grep -E "^  a " | grep -q UP; ok "short on memory: a (started by llmx) is stopped before b" $? 1
 $L status | grep -E "^  b " | grep -q UP; ok "b refuses to start if memory stays short" $? 1
 $L down a >/dev/null; $L down b >/dev/null
+# small input: refused unless forced; big log: reduced mechanically before the model
+out=$(LLMX_MIN_CHARS=2500 $L run commit-draft --in "$T/a.py" 2>&1); ok "small input refused (exit 3 text)" "$(echo "$out" | grep -c 'reading it yourself')" 1
+python3 -c "
+for i in range(3000): print(f'2026-01-01 10:00:{i%60:02d} INFO worker {i} heartbeat ok')
+print('ERROR real thing broke')
+for i in range(500): print('tail line', i)" > "$T/h.log"
+err=$(LLMX_MIN_CHARS=0 $L run log-triage --in "$T/h.log" 2>&1 >/dev/null); ok "heartbeat log reduced before the model" "$(echo "$err" | grep -c 'reduced mechanically')" 1
+python3 - <<P
+import sys; sys.path.insert(0, "$D/../skills/llmx/scripts"); import llmx
+t = open("$T/h.log").read(); r = llmx.reduce_log(t)
+assert "ERROR real thing broke" in r and len(r) < len(t) // 20, len(r)
+assert llmx.span_ok("12| foo ... bar", llmx.norm("foo xx bar")) and not llmx.span_ok("foo qqqq", "foo bar")
+print("ok   reduce_log keeps the error, span_ok tolerant")
+P
 exit $fail
